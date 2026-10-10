@@ -1,0 +1,67 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check authentication
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function to check platform superadmin
+    function isPlatformAdmin() {
+      return isAuthenticated() && (request.auth.token.role == 'platform_admin' || request.auth.token.admin == true);
+    }
+    
+    // Helper function to verify hospital ownership
+    function isAuthorizedHospitalAdmin(hospitalId) {
+      return isAuthenticated() && (
+        request.auth.token.hospitalId == hospitalId ||
+        request.auth.uid == resource.data.adminUid ||
+        request.auth.token.role == 'platform_admin'
+      );
+    }
+    
+    // Hospital collection rules
+    match /hospitals/{hospitalId} {
+      // Patients and emergency callers can read public hospital capability and capacity data
+      allow read: if true;
+      
+      // Hospital admins can ONLY update their own assigned hospital
+      allow update: if isAuthorizedHospitalAdmin(hospitalId)
+        // Strict bed capacity constraints:
+        // 1. Available beds must not be negative
+        && request.resource.data.availableBeds >= 0
+        // 2. Available beds must not exceed total bed capacity
+        && request.resource.data.availableBeds <= request.resource.data.totalBeds
+        // 3. Total beds must be greater than zero
+        && request.resource.data.totalBeds > 0
+        // 4. Coordinates must be valid
+        && request.resource.data.latitude >= -90 && request.resource.data.latitude <= 90
+        && request.resource.data.longitude >= -180 && request.resource.data.longitude <= 180
+        // 5. Operating status must be valid
+        && request.resource.data.operatingStatus in ['Open', 'Temporarily Unavailable', 'Closed']
+        // 6. Hospital Admins CANNOT tamper with or elevate verification status or isDemo flag
+        && (request.resource.data.verificationStatus == resource.data.verificationStatus || isPlatformAdmin())
+        && (request.resource.data.isDemo == resource.data.isDemo || isPlatformAdmin());
+        
+      // Only platform admins can register new hospital facilities or delete facilities
+      allow create, delete: if isPlatformAdmin();
+    }
+    
+    // Admin user registry collection
+    match /admins/{adminUid} {
+      // Admins can only read their own profile
+      allow read: if isAuthenticated() && (request.auth.uid == adminUid || isPlatformAdmin());
+      // Only platform admins can modify admin assignments
+      allow write: if isPlatformAdmin();
+    }
+    
+    // Emergency requests collection (strictly private patient triage data)
+    match /requests/{requestId} {
+      // Public patients can write triage requests, but cannot read others' private requests
+      allow create: if true;
+      allow read, update: if isAuthenticated();
+      allow delete: if isPlatformAdmin();
+    }
+  }
+}
